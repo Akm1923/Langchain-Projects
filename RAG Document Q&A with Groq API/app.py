@@ -1,17 +1,23 @@
 import os
+
+# Suppress TensorFlow warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TF logging (0=all, 1=info, 2=warning, 3=error)
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'  
+
 import streamlit as st
 from dotenv import load_dotenv
+import warnings
+warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 # LangChain imports
-from langchain.embeddings import OllamaEmbeddings
 from langchain_groq import ChatGroq
 from langchain_community.document_loaders import PyPDFDirectoryLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents.stuff import create_stuff_documents_chain
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 
 
 # Load environment variables
@@ -26,7 +32,9 @@ os.environ["LANGSMITH_TRACING"] = os.getenv("LANGSMITH_TRACING")
 # API keys
 groq_api_key = os.getenv("GROQ_API_KEY")
 hf_token = os.getenv("HF_TOKEN")
-os.environ['HF_TOKEN'] = hf_token
+# Ensure token is available to HuggingFaceEmbeddings
+if hf_token:
+    os.environ['HUGGINGFACEHUB_API_TOKEN'] = hf_token
 
 
 # Initialize LLM from Groq
@@ -42,17 +50,16 @@ llm = ChatGroq(
 st.title("📄 RAG Document Q&A with Groq")
 st.text("Ask a question based on the paper: 'Attention Is All You Need'\n(Located in the 'research_papers' folder)")
 
-
 # Prompt Template for Q&A
 
 template = ChatPromptTemplate.from_template(
-    """
-    You are a helpful assistant. Answer the question based on the context provided.
-    <context>
-    {context}
-    <context>
-    question: {input}
-    """
+    """You are a helpful assistant. Answer the question based on the context provided.
+    
+Context: {context}
+
+Question: {question}
+
+Answer:"""
 )
 
 
@@ -63,7 +70,7 @@ def create_vector_embeddings():
     Initializes and stores vector embeddings for PDF documents in the Streamlit session state.
     This function performs the following steps:
     1. Checks if vector embeddings have already been created in the session state.
-    2. Initializes the embedding model (OllamaEmbeddings with "llama3.2").
+    2. Initializes the embedding model (HuggingFaceEmbeddings with Qwen).
     3. Loads PDF documents from the "research_papers" directory.
     4. Splits the loaded documents into manageable text chunks.
     5. Stores the loader, documents, text splitter, and chunks in the session state.
@@ -73,10 +80,10 @@ def create_vector_embeddings():
     """
     # Only run once per session
     if "vectors" not in st.session_state:
-        # st.session_state.embeddings = HuggingFaceEmbeddings(
-        #     model_name="Qwen/Qwen3-Embedding-0.6B"
-        # )
-        st.session_state.embeddings = OllamaEmbeddings(model="llama3.2")
+        # Use HuggingFaceEmbeddings with the requested model id
+        st.session_state.embeddings = HuggingFaceEmbeddings(
+            model_name="google/embeddinggemma-300m"
+        )
 
         # Load PDF documents from local folder
         loader = PyPDFDirectoryLoader("research_papers")
@@ -120,20 +127,34 @@ if st.button("🧠 Get Answer") and user_prompt:
     if "vectors" not in st.session_state:
         st.warning("⚠️ Please generate document embeddings first.")
     else:
-        # Create the retrieval and document chain
+        # Create the retriever
         retriever = st.session_state.vectors.as_retriever()
-        document_chain = create_stuff_documents_chain(llm=llm, prompt=template)
-        retrieval_chain = create_retrieval_chain(retriever, document_chain)
-
+        
+        # Format documents helper function
+        def format_docs(docs):
+            return "\n\n".join(doc.page_content for doc in docs)
+        
+        # Create RAG chain using LCEL
+        rag_chain = (
+            {"context": retriever | format_docs, "question": RunnablePassthrough()}
+            | template
+            | llm
+            | StrOutputParser()
+        )
+        
         # Get response
-        response = retrieval_chain.invoke({"input": user_prompt})
+        with st.spinner("Thinking..."):
+            answer = rag_chain.invoke(user_prompt)
+            
+            # Get context documents separately for display
+            context_docs = retriever.invoke(user_prompt)
 
         # Show final answer
         st.markdown("### 🧠 Answer:")
-        st.write(response["answer"])
+        st.write(answer)
 
         # Show document context
         with st.expander("📚 See Retrieved Context"):
-            for doc in response["context"]:
+            for doc in context_docs:
                 st.write(doc.page_content)
                 st.caption(f"Source: {doc.metadata.get('source', 'Unknown')}")
