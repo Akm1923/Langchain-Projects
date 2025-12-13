@@ -3,3 +3,8 @@ langchain_groq
 langchain
 langchain_community
 langchain_core
+langchain_huggingface
+langchain_text_splitters
+sentence-transformers
+pypdf
+python-dotenv
